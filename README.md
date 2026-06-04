@@ -99,6 +99,9 @@ from ratemds_scraper import Fetcher, run_all
 run_all(Fetcher(), specialties=["dermatologist"], states=["ca"], workers=4)
 ```
 
+See [`examples/basic_usage.py`](examples/basic_usage.py) for a runnable
+end-to-end demo (a small state, so it finishes quickly).
+
 ## Output
 
 Two CSVs in `./output/` (override with `--output` or `RATEMDS_OUTPUT_DIR`):
