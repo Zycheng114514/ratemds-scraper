@@ -1,0 +1,32 @@
+# Scraper output (data, ledger, cookies, logs)
+output/
+*.csv
+*.jsonl
+run.log
+run.pgid
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local fleet config (may contain host names)
+src/ratemds_scraper/fleet/scripts/fleet.conf
+fleet.conf

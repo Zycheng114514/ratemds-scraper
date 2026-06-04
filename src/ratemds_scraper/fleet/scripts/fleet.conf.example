@@ -1,0 +1,13 @@
+# fleet.conf -- one worker per line:  <ssh-host>   <comma-separated state slugs>
+#
+# Copy this to fleet.conf and edit. <ssh-host> is anything your ssh understands
+# (a Host alias from ~/.ssh/config, or user@ip). Give each worker a DISJOINT set
+# of states; overlap is safe (the combine step dedupes) but wastes effort.
+#
+# The example below shards the 50 states + DC across 4 workers, population-
+# balanced. 'dc/washington' is DC. Omit states you don't want.
+
+worker-a   ca,ga,nc,tn,in,al,la,nv,ar,hi,nh,ak,vt
+worker-b   tx,oh,mi,ma,mo,sc,ky,ia,ms,wv,me,nd,wy
+worker-c   fl,il,nj,az,md,mn,or,ut,ks,id,mt,sd,dc/washington
+worker-d   ny,pa,va,wa,wi,co,ok,ct,nm,ne,ri,de
