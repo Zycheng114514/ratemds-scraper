@@ -242,14 +242,39 @@ def _scrape_one_doctor(fetcher, qrow, doctors: CsvSink, reviews: CsvSink,
         except parse.BlobNotFound:
             anomaly(f"doctor:{did}: ratemds page {n} missing blob; url={url}")
 
-    # Paginate Our Partners reviews (page 2..N) via ?third_party_page=n
+    # Paginate Our Partners reviews (page 2..N) via ?third_party_page=n.
+    # NOTE: the partner feed re-serves the same recent batch regardless of the
+    # requested page (the server keeps current_page=1), so a page that adds no
+    # new review_ids means the distinct partner reviews are exhausted -- stop
+    # rather than keep re-fetching (and re-appending) the same rows.
+    seen_partner_ids = {r["review_id"] for r in all_reviews
+                        if r.get("review_type") == "Our Partners"}
     for n in range(2, dp.partner_pages + 1):
         url = config.review_page_url(profile_url, n, "partners")
         try:
-            all_reviews += parse.parse_review_page(fetcher.get(url, use_cache=use_cache),
-                                                   did, name, "partners")
+            page_rows = parse.parse_review_page(fetcher.get(url, use_cache=use_cache),
+                                                did, name, "partners")
         except parse.BlobNotFound:
             anomaly(f"doctor:{did}: partner page {n} missing blob; url={url}")
+            continue
+        new_rows = [r for r in page_rows if r["review_id"] not in seen_partner_ids]
+        if not new_rows:
+            break   # partner feed repeated -- no further distinct reviews
+        seen_partner_ids.update(r["review_id"] for r in new_rows)
+        all_reviews += new_rows
+
+    # De-duplicate within this doctor by review_id (keep first). Guards against
+    # the partner feed re-serving rows and against an interrupted/resumed run
+    # revisiting a page.
+    seen_ids: set = set()
+    deduped: list[dict] = []
+    for r in all_reviews:
+        rid = r.get("review_id")
+        if rid in seen_ids:
+            continue
+        seen_ids.add(rid)
+        deduped.append(r)
+    all_reviews = deduped
 
     reviews.write_many(all_reviews)
     reviews.flush()

@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- "Our Partners" reviews are no longer collected redundantly. The partner feed
+  (`?third_party_page=n`) re-serves the same recent batch regardless of the
+  requested page, so the scraper now stops paginating once a page contributes no
+  new `review_id`s, and de-duplicates reviews per doctor by `review_id` before
+  writing. This removes duplicate partner rows from raw output and eliminates the
+  spurious "scraped more than expected" over-capture anomalies.
+
 ## [0.1.0] — 2026-06-04
 
 Initial public release.
