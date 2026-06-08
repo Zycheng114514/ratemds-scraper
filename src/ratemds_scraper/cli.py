@@ -88,6 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--doctors", default=None, help="path to doctors.csv")
     v.add_argument("--reviews", default=None, help="path to reviews.csv")
     v.add_argument("--tol", type=float, default=0.2, help="tolerance for rating cross-checks")
+
+    a = sub.add_parser("analyze", help="quick read-only descriptive summary of the scrape")
+    a.add_argument("--output", default=None, metavar="DIR",
+                   help="output directory to analyze (default: ./output[/combined])")
+    a.add_argument("--doctors", default=None, help="path to doctors.csv")
+    a.add_argument("--reviews", default=None, help="path to reviews.csv")
+    a.add_argument("--top", type=int, default=10, help="rows per top-N table")
     return p
 
 
@@ -103,10 +110,15 @@ def main(argv=None):
     if getattr(args, "output", None):
         config.set_output_dir(args.output)
 
-    # verify has its own entry point and needs no fetcher / network
+    # verify / analyze have their own entry points and need no fetcher / network
     if args.cmd == "verify":
         from . import verify
         verify.run(doctors=args.doctors, reviews=args.reviews, tol=args.tol)
+        return
+
+    if args.cmd == "analyze":
+        from . import analyze
+        analyze.run(doctors=args.doctors, reviews=args.reviews, top=args.top)
         return
 
     from . import scraper

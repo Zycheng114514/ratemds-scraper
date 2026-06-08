@@ -37,7 +37,8 @@ It is built around two ideas that make it fast and robust:
 - Thread-pooled (`--workers`) sharing a single cookie — no browser-per-thread.
 - **Distributed mode** to shard a crawl across many machines/IPs and merge the
   results losslessly.
-- A `verify` command that reconciles review counts and cross-checks ratings.
+- A `verify` command that reconciles review counts and cross-checks ratings, and
+  an `analyze` command that prints a quick descriptive summary of the scrape.
 
 ## Install
 
@@ -71,7 +72,8 @@ ratemds-scraper run-all --specialty dermatologist --states ca,tx
 ratemds-scraper run-all --specialty dermatologist,family-gp --gender F
 
 # Check what you got
-ratemds-scraper verify
+ratemds-scraper verify     # integrity: do the counts/ratings reconcile?
+ratemds-scraper analyze    # summary: totals, source split, ratings, top states, by year
 ```
 
 `--specialty` is just the slug RateMDs uses in `?specialty=` (e.g.
@@ -87,6 +89,7 @@ specialty; omit `--gender` for all.
 | `scrape-doctors` | visit each queued doctor and paginate all their reviews |
 | `dedupe` | drop duplicate rows left by an interrupted/resumed run |
 | `verify` | post-scrape integrity + robustness checks |
+| `analyze` | read-only descriptive summary (totals, source split, rating distribution, top specialties/states, reviews by year) |
 
 Common flags: `--states`, `--workers`, `--delay MIN MAX`, `--target {desktop,server}`,
 `--cache`, `--output DIR`. Run `ratemds-scraper <command> -h` for the full list.

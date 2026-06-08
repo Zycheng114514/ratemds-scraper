@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `analyze` command: a read-only descriptive summary of a scrape (totals and
+  reviews-per-doctor distribution, RateMDs vs "Our Partners" source split, star
+  and overall-rating distributions, top specialties/states, and review volume by
+  year). Reuses `verify`'s loaders so the two stay in sync.
+
 ### Fixed
 - "Our Partners" reviews are no longer collected redundantly. The partner feed
   (`?third_party_page=n`) re-serves the same recent batch regardless of the
