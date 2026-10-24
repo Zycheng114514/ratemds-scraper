@@ -44,6 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="randomized per-request delay range in seconds")
     common.add_argument("--cache", action="store_true",
                         help="gzip-cache raw HTML and reuse it (great for re-parsing)")
+    common.add_argument("--transport", choices=["curl", "browser"], default="curl",
+                        help="curl (default): system curl, no display required; browser: "
+                             "Cloudflare cookie harvest followed by curl_cffi")
     common.add_argument("--target", choices=["desktop", "server"], default="desktop",
                         help="desktop (default): HEADED browser for the Cloudflare "
                              "harvest -- robust, needs a display (use xvfb-run on a "
@@ -134,22 +137,28 @@ def main(argv=None):
         delay=tuple(args.delay),
         headless=(args.target == "server"),
         cache_dir=config.HTML_CACHE_DIR if args.cache else None,
+        transport=args.transport,
     )
     states_list = _split(getattr(args, "states", None))
 
-    if args.cmd == "discover":
-        states = ([args.state] if args.state else None) or states_list
-        scraper.discover(fetcher, args.specialty, args.gender, states=states,
-                         max_page=args.max_page, use_cache=args.cache, workers=args.workers)
-    elif args.cmd == "scrape-doctors":
-        scraper.scrape_doctors(fetcher, specialty=args.specialty, gender=args.gender,
-                               limit=args.limit, use_cache=args.cache,
-                               workers=args.workers, states=states_list)
-    elif args.cmd == "run-all":
-        scraper.run_all(fetcher, specialties=_split(args.specialty),
-                        genders=_split(args.gender), states=states_list,
-                        use_cache=args.cache, workers=args.workers)
+    try:
+        if args.cmd == "discover":
+            states = ([args.state] if args.state else None) or states_list
+            scraper.discover(fetcher, args.specialty, args.gender, states=states,
+                             max_page=args.max_page, use_cache=args.cache, workers=args.workers)
+        elif args.cmd == "scrape-doctors":
+            scraper.scrape_doctors(fetcher, specialty=args.specialty, gender=args.gender,
+                                   limit=args.limit, use_cache=args.cache,
+                                   workers=args.workers, states=states_list)
+        elif args.cmd == "run-all":
+            scraper.run_all(fetcher, specialties=_split(args.specialty),
+                            genders=_split(args.gender), states=states_list,
+                            use_cache=args.cache, workers=args.workers)
+    except (scraper.IncompleteScrapeError, scraper.CloudflareError) as exc:
+        logging.getLogger("ratemds").error("Crawl incomplete; rerun to resume: %s", exc)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

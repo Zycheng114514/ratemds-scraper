@@ -13,12 +13,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   year). Reuses `verify`'s loaders so the two stay in sync.
 
 ### Fixed
-- "Our Partners" reviews are no longer collected redundantly. The partner feed
-  (`?third_party_page=n`) re-serves the same recent batch regardless of the
-  requested page, so the scraper now stops paginating once a page contributes no
-  new `review_id`s, and de-duplicates reviews per doctor by `review_id` before
-  writing. This removes duplicate partner rows from raw output and eliminates the
-  spurious "scraped more than expected" over-capture anomalies.
+- Use ordinary system `curl` by default on hosts where browser impersonation
+  returns HTTP 202. The existing browser/curl_cffi path remains available with
+  `--transport browser`; default delays and concurrency are unchanged.
+- Fetch all "Our Partners" review pages through the public profile's JSON
+  response (`?third_party_page=n&json=true`). HTML embeds page 1 regardless of
+  the requested partner page, so stopping at repeated HTML truncated the feed.
+- Scope review deduplication by source and ID, preserving distinct reviews with
+  the same numeric ID in RateMDs and partner feeds.
+- Keep doctors with missing pages or unreconciled counts pending. Report failed
+  discovery and incomplete scrapes through exit status 2; the fleet loop retries
+  those exits instead of treating zero processed doctors as convergence.
 
 ## [0.1.0] — 2026-06-04
 

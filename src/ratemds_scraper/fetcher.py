@@ -1,27 +1,9 @@
-"""
-cloudflare.py -- Layered, thread-safe, server-ready fetcher that gets past
-RateMDs' Cloudflare JS challenge.
+"""Thread-safe public-page fetching with bounded retries and a shared cooldown.
 
-Strategy (confirmed with the user):
-  1. Use a REAL headless browser (nodriver, falling back to Playwright+stealth)
-     to solve the JS challenge ONCE and harvest the ``cf_clearance`` cookie plus
-     the browser's exact User-Agent.
-  2. Reuse that cookie/UA with fast ``curl_cffi`` requests (Chrome TLS
-     impersonation) for the bulk of fetching.
-  3. On a 403 / challenge response, transparently re-harvest and retry.
-
-Concurrency model (why you do NOT need one browser per thread):
-  The cf_clearance cookie is bound to {User-Agent, IP}, not to a browser session.
-  A single harvested cookie can therefore be sent on MANY simultaneous curl_cffi
-  requests from the same machine. So N worker threads share ONE cookie and each
-  use their own curl_cffi session -- much lighter than launching N browsers.
-  Concurrency is ultimately limited by per-IP rate limiting, which you tune with
-  --workers and --delay. (To go beyond one IP you'd add a rotating proxy pool;
-  the harvest is per-IP so each proxy would need its own cookie.)
-
-Server / headless notes:
-  Runs fine with no display. config.BROWSER_ARGS adds --no-sandbox etc. so Chrome
-  starts in containers and as root. See README "Running on a server".
+The default transport is ordinary system curl, without browser cookies or TLS
+impersonation. Its request interval is shared across workers. The optional
+``browser`` transport retains headed-browser clearance harvesting followed by
+curl_cffi requests, for hosts where that method is needed.
 """
 
 from __future__ import annotations
@@ -33,6 +15,7 @@ import random
 import asyncio
 import logging
 import threading
+import subprocess
 
 from . import config
 from .parse import looks_like_challenge
@@ -54,10 +37,13 @@ class Fetcher:
     """
 
     def __init__(self, delay=(config.DELAY_MIN, config.DELAY_MAX),
-                 headless: bool = False, cache_dir: str | None = None):
-        # NOTE: default is HEADED. Cloudflare detects headless Chrome and never
-        # clears the challenge; a headed browser (real or xvfb display) solves it
-        # instantly. On a display-less server, run under `xvfb-run`.
+                 headless: bool = False, cache_dir: str | None = None,
+                 transport: str = "curl"):
+        if transport not in ("curl", "browser"):
+            raise ValueError("transport must be 'curl' or 'browser'")
+        self.transport = transport
+        # The optional browser transport defaults to a headed browser; servers
+        # can provide a virtual display with xvfb-run. Curl needs no display.
         self.delay_min, self.delay_max = delay
         self.headless = headless
         self.cache_dir = cache_dir
@@ -70,8 +56,11 @@ class Fetcher:
         self._cache_lock = threading.Lock()     # guard the gzip cache writes
         self._cooldown_until = 0.0              # global throttle shared by all threads
         self._cooldown_lock = threading.Lock()
+        self._request_lock = threading.Lock()
+        self._next_request = 0.0
 
-        self._load_cf_state()
+        if transport == "browser":
+            self._load_cf_state()
 
     # ------------------------------------------------------------------ #
     # cf_clearance persistence
@@ -126,9 +115,8 @@ class Fetcher:
     # Cloudflare clearance harvest (browser) -- thread-safe
     # ------------------------------------------------------------------ #
     def ensure_clearance(self):
-        """Make sure we hold a cookie; harvest once if not. Safe to call from
-        the main thread before dispatching workers (recommended)."""
-        if not self._cf_clearance:
+        """Warm up the browser transport; a no-op for ordinary curl."""
+        if self.transport == "browser" and not self._cf_clearance:
             self._refresh_clearance(old_cookie=None)
 
     def _refresh_clearance(self, old_cookie: str | None, warm_url: str | None = None):
@@ -291,6 +279,9 @@ class Fetcher:
             if cached is not None:
                 return cached
 
+        if self.transport == "curl":
+            return self._get_with_curl(url, use_cache)
+
         if not self._cf_clearance:
             self._refresh_clearance(old_cookie=None, warm_url=url)
 
@@ -329,6 +320,54 @@ class Fetcher:
                 self._set_cooldown(backoff)
 
         raise CloudflareError(f"giving up on {url}: {last_err}")
+
+    def _get_with_curl(self, url: str, use_cache: bool) -> str:
+        """Fetch public pages without browser cookies or TLS impersonation.
+
+        A single request schedule bounds the aggregate rate across all workers.
+        The optional browser transport remains available when a host needs it.
+        """
+        last_err = None
+        for attempt in range(config.MAX_RETRIES):
+            with self._request_lock:
+                self._respect_cooldown()
+                time.sleep(max(0.0, self._next_request - time.monotonic()))
+                self._respect_cooldown()
+                self._next_request = time.monotonic() + random.uniform(
+                    self.delay_min, self.delay_max,
+                )
+            try:
+                result = subprocess.run(
+                    ["curl", "--silent", "--show-error", "--location", "--proto", "=https",
+                     "--proto-redir", "=https", "--connect-timeout", "15", "--max-time",
+                     str(config.REQUEST_TIMEOUT), "--write-out", "\n%{http_code}", "--url", url],
+                    capture_output=True, check=True, timeout=config.REQUEST_TIMEOUT + 5,
+                )
+                html, status = result.stdout.decode("utf-8").rsplit("\n", 1)
+                if status != "200" or looks_like_challenge(html):
+                    raise CloudflareError(f"HTTP {status} or challenge response")
+                if use_cache and self.cache_dir:
+                    self._write_cache(url, html)
+                return html
+            except FileNotFoundError as exc:
+                raise CloudflareError(
+                    "system curl is required; install curl or use --transport browser"
+                ) from exc
+            except (subprocess.SubprocessError, UnicodeError, ValueError, CloudflareError) as exc:
+                last_err = exc
+                log.warning("curl request error on %s: %s (attempt %d)", url, exc, attempt + 1)
+                self._set_cooldown(config.BACKOFF_BASE * (2 ** attempt))
+        raise CloudflareError(f"giving up on {url}: {last_err}")
+
+    def get_json(self, url: str, use_cache: bool = False) -> dict:
+        """Read the JSON response used by the public profile's pagination widget."""
+        try:
+            data = json.loads(self.get(url, use_cache=use_cache))
+        except json.JSONDecodeError as exc:
+            raise CloudflareError(f"invalid JSON response on {url}") from exc
+        if not isinstance(data, dict):
+            raise CloudflareError(f"expected a JSON object on {url}")
+        return data
 
     # ------------------------------------------------------------------ #
     # Optional raw-HTML cache (handy while tuning parse.py)

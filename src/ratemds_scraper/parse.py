@@ -536,11 +536,16 @@ def parse_review_page(html: str, doctor_id, doctor_name: str, kind: str) -> list
     Returns only that page's review rows.
     """
     blob = extract_blob(html, "doctorDetailProps")
+    field = "ratingsPage" if kind == "ratemds" else "thirdPartyRatingsPage"
+    return parse_review_data(blob.get(field) or {}, doctor_id, doctor_name, kind)
+
+
+def parse_review_data(page: dict, doctor_id, doctor_name: str, kind: str) -> list[dict]:
+    """Map a review page object, including the public partner JSON response."""
+    results = page.get("results", []) or []
     if kind == "ratemds":
-        results = (blob.get("ratingsPage") or {}).get("results", []) or []
         return [_map_ratemds_review(doctor_id, doctor_name, r) for r in results]
     elif kind == "partners":
-        results = (blob.get("thirdPartyRatingsPage") or {}).get("results", []) or []
         return [_map_partner_review(doctor_id, doctor_name, r) for r in results]
     raise ValueError(f"unknown kind: {kind}")
 

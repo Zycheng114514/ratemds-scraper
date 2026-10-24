@@ -3,7 +3,7 @@
 RateMDs rate-limits per IP. On one IP, ~4 workers is the sweet spot; adding more
 threads just trips Cloudflare 429s and self-throttles. So the only real way to
 go faster is **more IPs** — i.e. more machines, each crawling a disjoint slice
-of states from its own IP with its own `cf_clearance`.
+of states. The default curl transport needs no browser cookie or virtual display.
 
 The `fleet` tooling does exactly that and then merges the results losslessly.
 The scripts live inside the package at `ratemds_scraper/fleet/scripts/` (copy
@@ -36,8 +36,12 @@ the merge dedupes by id.
 ```
 
 Each worker runs `runloop.sh`, which re-invokes the scraper until its queue is
-drained (so transient give-ups get retried automatically) and survives restarts
-via the ledger. A worker is also usable standalone:
+complete (so transient give-ups get retried automatically) and survives restarts
+via the ledger. It checks the CLI exit status: zero means complete; nonzero
+means incomplete even if zero doctors were processed. After `MAXPASS` attempts
+it exits with the last failure code. `RETRY_DELAY` defaults to 60 seconds.
+Set `TRANSPORT=browser` to use the optional browser transport; the loop uses
+`xvfb-run` only in that mode. A worker is also usable standalone:
 
 ```bash
 RATEMDS_ROOT=~/ratemds-run ./worker.sh start "ca,nv"

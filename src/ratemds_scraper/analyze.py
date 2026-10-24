@@ -27,10 +27,10 @@ import argparse
 import statistics
 from collections import Counter
 
-_YEAR_RE = re.compile(r"\b(19|20)\d\d\b")
-
 # Reuse verify's small, well-tested loaders/formatters so the two stay in sync.
-from .verify import to_float, to_int, find_default_files, load_rows, banner, pct
+from .verify import to_float, find_default_files, load_rows, banner, pct
+
+_YEAR_RE = re.compile(r"\b(19|20)\d\d\b")
 
 csv.field_size_limit(16 * 1024 * 1024)   # some review bodies are long
 

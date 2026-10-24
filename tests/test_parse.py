@@ -45,7 +45,7 @@ def test_facet_key_defaults_to_all():
 def test_review_page_url():
     base = "https://www.ratemds.com/doctor-ratings/123/Dr-X.html/"
     assert config.review_page_url(base, 2, "ratemds").endswith("?page=2")
-    assert config.review_page_url(base, 2, "partners").endswith("?third_party_page=2")
+    assert config.review_page_url(base, 2, "partners").endswith("?third_party_page=2&json=true")
 
 
 # --------------------------------------------------------------------------- #

@@ -111,13 +111,13 @@ def review_page_url(profile_url: str, page: int, kind: str) -> str:
     """Paginated review URL for a doctor profile.
 
     kind == 'ratemds'  -> ?page=n              (RateMDs reviews)
-    kind == 'partners' -> ?third_party_page=n  (Our Partners reviews)
+    kind == 'partners' -> ?third_party_page=n&json=true (Our Partners JSON feed)
     """
     base = profile_url.split("?")[0].split("#")[0]
     if not base.endswith("/"):
         base += "/"
     param = "page" if kind == "ratemds" else "third_party_page"
-    return f"{base}?{param}={page}"
+    return f"{base}?{param}={page}" + ("&json=true" if kind == "partners" else "")
 
 
 # --------------------------------------------------------------------------- #

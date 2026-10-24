@@ -18,6 +18,7 @@ import os
 import csv
 import logging
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 from . import config
@@ -26,6 +27,10 @@ from .fetcher import Fetcher, CloudflareError
 from .ledger import Ledger, CsvSink, anomaly
 
 log = logging.getLogger("ratemds.scraper")
+
+
+class IncompleteScrapeError(Exception):
+    """Some requested pages or doctors remain unfinished and can be retried."""
 
 
 # --------------------------------------------------------------------------- #
@@ -50,6 +55,7 @@ def discover(fetcher: Fetcher, specialty: str | None = None,
                      "profile_url", "state", "gender", "facet"])
     seen = _load_seen_ids(config.QUEUE_CSV)
     seen_lock = threading.Lock()
+    failures = []
     fetcher.ensure_clearance()   # warm up cookie in the main thread
 
     def record(stubs, key) -> int:
@@ -68,19 +74,25 @@ def discover(fetcher: Fetcher, specialty: str | None = None,
         slabel = config.state_label(state)
         key = config.facet_key(state, specialty, gender)
 
-        def handle_page(page: int):
+        def handle_page(page: int, key=key, state=state, slabel=slabel):
             unit = f"search:{key}:{page}"
             if ledger.has(unit):
                 return
             url = config.search_url(state, specialty, gender, page)
             try:
                 html = fetcher.get(url, use_cache=use_cache)
-                stubs, _ = parse.parse_search_page(html, gender=gender, state=slabel)
+                stubs, pg = parse.parse_search_page(html, gender=gender, state=slabel)
+                if pg.current_page != page or (pg.count and not stubs):
+                    raise IncompleteScrapeError(f"{unit}: incorrect or empty search page")
             except parse.BlobNotFound:
                 anomaly(f"{unit}: no doctor_list_props blob; url={url}")
+                with seen_lock:
+                    failures.append(unit)
                 return
-            except CloudflareError as e:
-                log.error("Cloudflare gave up on %s: %s", url, e)
+            except (CloudflareError, IncompleteScrapeError) as e:
+                log.error("Search page failed on %s: %s", url, e)
+                with seen_lock:
+                    failures.append(unit)
                 return
             record(stubs, key)
             ledger.mark(unit)
@@ -93,24 +105,32 @@ def discover(fetcher: Fetcher, specialty: str | None = None,
                 html = fetcher.get(config.search_url(state, specialty, gender, 1),
                                    use_cache=use_cache)
                 stubs, pg = parse.parse_search_page(html, gender=gender, state=slabel)
+                if pg.current_page != 1 or (pg.count and not stubs):
+                    raise IncompleteScrapeError(f"{unit1}: incorrect or empty search page")
                 total_pages = max_page or pg.total_pages or 1
                 record(stubs, key)
                 ledger.mark(unit1)
             except parse.BlobNotFound:
                 anomaly(f"{unit1}: no blob; skipping state {slabel}")
+                failures.append(unit1)
                 continue
-            except CloudflareError as e:
-                log.error("Cloudflare gave up on state %s: %s", slabel, e)
+            except (CloudflareError, IncompleteScrapeError) as e:
+                log.error("Search failed on state %s: %s", slabel, e)
+                failures.append(unit1)
                 continue
         else:
             # already did page 1 on a prior run; refetch just to learn total_pages
             try:
                 html = fetcher.get(config.search_url(state, specialty, gender, 1),
                                    use_cache=use_cache)
-                _, pg = parse.parse_search_page(html, gender=gender, state=slabel)
+                stubs, pg = parse.parse_search_page(html, gender=gender, state=slabel)
+                if pg.current_page != 1 or (pg.count and not stubs):
+                    raise IncompleteScrapeError(f"{unit1}: incorrect or empty search page")
                 total_pages = max_page or pg.total_pages or 1
-            except Exception:
-                total_pages = max_page or 1
+            except (CloudflareError, parse.BlobNotFound, IncompleteScrapeError) as e:
+                log.error("Could not recover page count for %s: %s", slabel, e)
+                failures.append(unit1)
+                continue
 
         log.info("Discover %s/%s state=%s: %d pages (queue total=%d)",
                  specialty or "all", gender or "all", slabel, total_pages, len(seen))
@@ -127,6 +147,8 @@ def discover(fetcher: Fetcher, specialty: str | None = None,
     ledger.close()
     log.info("Discover done for %s/%s: %d unique doctors queued total.",
              specialty or "all", gender or "all", len(seen))
+    if failures:
+        raise IncompleteScrapeError(f"{len(failures)} search pages failed")
 
 
 def _load_seen_ids(queue_path: str) -> set:
@@ -157,14 +179,14 @@ def scrape_doctors(fetcher: Fetcher, specialty: str | None = None,
     and ledger are all thread-safe.
     """
     if not os.path.exists(config.QUEUE_CSV):
-        log.error("No queue file at %s -- run 'discover' first.", config.QUEUE_CSV)
-        return
+        raise IncompleteScrapeError(f"No queue file at {config.QUEUE_CSV}; run discover first")
 
     ledger = Ledger(config.DONE_LEDGER)
     doctors = CsvSink(config.DOCTORS_CSV, parse.DOCTOR_COLUMNS)
     reviews = CsvSink(config.REVIEWS_CSV, parse.REVIEW_COLUMNS)
 
-    rows = list(csv.DictReader(open(config.QUEUE_CSV, encoding="utf-8")))
+    with open(config.QUEUE_CSV, encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
     # Filter by the queue's own facet/gender/state columns.
     if specialty:
         rows = [r for r in rows if r.get("facet", "").startswith(specialty + "-")]
@@ -181,7 +203,7 @@ def scrape_doctors(fetcher: Fetcher, specialty: str | None = None,
 
     log.info("scrape-doctors: %d doctors pending (workers=%d)", len(pending), workers)
     fetcher.ensure_clearance()   # warm up cookie in the main thread
-    counter = {"done": 0}
+    counter = {"done": 0, "failed": 0}
     counter_lock = threading.Lock()
 
     def work(r):
@@ -199,10 +221,21 @@ def scrape_doctors(fetcher: Fetcher, specialty: str | None = None,
             # killing the crawl.
             log.error("Cloudflare gave up on doctor %s: %s", did, e)
             anomaly(f"doctor:{did}: cloudflare gave up (left pending for retry); {e}")
+            with counter_lock:
+                counter["failed"] += 1
         except parse.BlobNotFound:
             anomaly(f"doctor:{did}: no doctorDetailProps blob; url={r.get('profile_url')}")
+            with counter_lock:
+                counter["failed"] += 1
+        except IncompleteScrapeError as e:
+            log.warning("doctor %s incomplete (will retry next run): %s", did, e)
+            with counter_lock:
+                counter["failed"] += 1
         except Exception as e:
             anomaly(f"doctor:{did}: unexpected error {type(e).__name__}: {e}")
+            log.exception("doctor %s failed", did)
+            with counter_lock:
+                counter["failed"] += 1
 
     if workers <= 1:
         for r in pending:
@@ -215,6 +248,8 @@ def scrape_doctors(fetcher: Fetcher, specialty: str | None = None,
     reviews.close()
     ledger.close()
     log.info("scrape-doctors done: %d doctors processed this run.", counter["done"])
+    if counter["failed"]:
+        raise IncompleteScrapeError(f"{counter['failed']} doctors remain incomplete")
 
 
 def _scrape_one_doctor(fetcher, qrow, doctors: CsvSink, reviews: CsvSink,
@@ -227,49 +262,57 @@ def _scrape_one_doctor(fetcher, qrow, doctors: CsvSink, reviews: CsvSink,
     dr = dp.doctor_row
     did = dr["doctor_id"]
     name = dr["name"]
+    if str(did) != str(qrow.get("doctor_id")):
+        raise IncompleteScrapeError(f"profile ID {did} differs from queued ID {qrow.get('doctor_id')}")
 
     doctors.write(dr)
     doctors.flush()
 
     all_reviews = list(dp.reviews)   # page 1 already has RateMDs + partners
+    issues = []
 
     # Paginate RateMDs reviews (page 2..N) via ?page=n
     for n in range(2, dp.ratemds_pages + 1):
         url = config.review_page_url(profile_url, n, "ratemds")
         try:
-            all_reviews += parse.parse_review_page(fetcher.get(url, use_cache=use_cache),
-                                                   did, name, "ratemds")
+            blob = parse.extract_blob(fetcher.get(url, use_cache=use_cache), "doctorDetailProps")
+            page = blob.get("ratingsPage") or {}
+            if str(blob.get("doctor", {}).get("id")) != str(did):
+                raise IncompleteScrapeError(f"RateMDs page {n} belongs to another doctor")
+            if page.get("current_page", 1) != n:
+                issues.append(f"RateMDs page {n} repeated or missing")
+                break
+            all_reviews += parse.parse_review_data(page, did, name, "ratemds")
         except parse.BlobNotFound:
             anomaly(f"doctor:{did}: ratemds page {n} missing blob; url={url}")
+            issues.append(f"RateMDs page {n} missing blob")
 
-    # Paginate Our Partners reviews (page 2..N) via ?third_party_page=n.
-    # NOTE: the partner feed re-serves the same recent batch regardless of the
-    # requested page (the server keeps current_page=1), so a page that adds no
-    # new review_ids means the distinct partner reviews are exhausted -- stop
-    # rather than keep re-fetching (and re-appending) the same rows.
+    # HTML always embeds partner page 1. Request the public profile's JSON
+    # representation, as the site's own pagination widget does.
     seen_partner_ids = {r["review_id"] for r in all_reviews
                         if r.get("review_type") == "Our Partners"}
     for n in range(2, dp.partner_pages + 1):
         url = config.review_page_url(profile_url, n, "partners")
-        try:
-            page_rows = parse.parse_review_page(fetcher.get(url, use_cache=use_cache),
-                                                did, name, "partners")
-        except parse.BlobNotFound:
-            anomaly(f"doctor:{did}: partner page {n} missing blob; url={url}")
-            continue
+        page = fetcher.get_json(url, use_cache=use_cache)
+        if page.get("current_page") != n:
+            issues.append(f"partner page {n} repeated or missing")
+            break
+        page_rows = parse.parse_review_data(page, did, name, "partners")
         new_rows = [r for r in page_rows if r["review_id"] not in seen_partner_ids]
         if not new_rows:
-            break   # partner feed repeated -- no further distinct reviews
+            issues.append(f"partner page {n} returned no new reviews")
+            break
         seen_partner_ids.update(r["review_id"] for r in new_rows)
         all_reviews += new_rows
 
-    # De-duplicate within this doctor by review_id (keep first). Guards against
-    # the partner feed re-serving rows and against an interrupted/resumed run
-    # revisiting a page.
+    # Review IDs are scoped to the source. De-duplicate by (type, id), so an ID
+    # shared by RateMDs and Our Partners does not discard a distinct review.
+    # This also handles repeated partner rows and interrupted runs revisiting
+    # a page.
     seen_ids: set = set()
     deduped: list[dict] = []
     for r in all_reviews:
-        rid = r.get("review_id")
+        rid = (r.get("review_type"), r.get("review_id"))
         if rid in seen_ids:
             continue
         seen_ids.add(rid)
@@ -280,10 +323,17 @@ def _scrape_one_doctor(fetcher, qrow, doctors: CsvSink, reviews: CsvSink,
     reviews.flush()
 
     # Reconciliation: emitted reviews should match the doctor's stated total.
+    counts = Counter(r.get("review_type") for r in all_reviews)
     if len(all_reviews) != dp.expected_total:
-        anomaly(f"doctor:{did} ({name}): scraped {len(all_reviews)} reviews but "
-                f"expected {dp.expected_total} "
-                f"(ratemds={dr['ratemds_count']} partners={dr['our_partners_count']})")
+        issues.append(f"total {len(all_reviews)}/{dp.expected_total}")
+    for source, expected in [("RateMDs", dr["ratemds_count"]),
+                             ("Our Partners", dr["our_partners_count"])]:
+        if counts[source] != expected:
+            issues.append(f"{source} {counts[source]}/{expected}")
+    if issues:
+        message = f"doctor:{did} ({name}): " + "; ".join(issues)
+        anomaly(message)
+        raise IncompleteScrapeError(message)
     log.info("  doctor %s '%s': %d reviews (expected %d)",
              did, name, len(all_reviews), dp.expected_total)
 
@@ -338,12 +388,21 @@ def run_all(fetcher: Fetcher, specialties: list[str | None] | None = None,
     """
     specialties = specialties or config.DEFAULT_SPECIALTIES
     genders = genders or config.DEFAULT_GENDERS
+    failures = []
     for specialty in specialties:
         for gender in genders:
-            discover(fetcher, specialty, gender, states=states,
-                     use_cache=use_cache, workers=workers)
+            try:
+                discover(fetcher, specialty, gender, states=states,
+                         use_cache=use_cache, workers=workers)
+            except IncompleteScrapeError as exc:
+                failures.append(str(exc))
     for specialty in specialties:
         for gender in genders:
-            scrape_doctors(fetcher, specialty=specialty, gender=gender,
-                           states=states, use_cache=use_cache, workers=workers)
+            try:
+                scrape_doctors(fetcher, specialty=specialty, gender=gender,
+                               states=states, use_cache=use_cache, workers=workers)
+            except IncompleteScrapeError as exc:
+                failures.append(str(exc))
     dedupe()   # tidy up any rows left by mid-doctor interruptions
+    if failures:
+        raise IncompleteScrapeError("; ".join(failures))
