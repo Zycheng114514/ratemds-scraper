@@ -94,3 +94,20 @@ def test_column_schemas_are_stable():
     assert parse.DOCTOR_COLUMNS[:3] == ["doctor_id", "name", "specialty"]
     assert "latitude" in parse.DOCTOR_COLUMNS and "longitude" in parse.DOCTOR_COLUMNS
     assert "review_type" in parse.REVIEW_COLUMNS
+
+
+def test_extract_blob_survives_escaped_quote_paren():
+    """A text field holding `");` must not truncate the JS string literal.
+
+    Two Illinois pediatrician bios embed a widget call ending in `");`.  The
+    live page escapes quotes as \\u0022, but a blob re-embedded with
+    json.dumps(json.dumps(blob)) escapes them as \\" -- the old lazy regex
+    stopped there and the first decode failed with "Unterminated string".
+    """
+    import json as _json
+    blob = {"doctor": {"id": 1, "bio": 'radiomd_embedded_filtered_doctor(""riverside"",""Herrera, Federico"");#x'}}
+    reembedded = "window.DATA.doctorDetailProps = JSON.parse(" + _json.dumps(_json.dumps(blob)) + ");"
+    assert parse.extract_blob(reembedded, "doctorDetailProps") == blob
+    inner = _json.dumps(blob).replace("\\", "\\\\").replace('"', "\\u0022")
+    live = '<script>window.DATA.doctorDetailProps = JSON.parse("' + inner + '");</script>'
+    assert parse.extract_blob(live, "doctorDetailProps") == blob

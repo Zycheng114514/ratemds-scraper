@@ -89,19 +89,25 @@ def extract_blob(html: str, var_name: str) -> dict:
 
     The argument to JSON.parse is a JavaScript string literal whose contents are
     themselves JSON, escaped with \\uXXXX sequences. So we decode twice:
-      1. json.loads('"' + raw + '"')  -> un-escape the JS string literal
+      1. JSONDecoder().raw_decode     -> un-escape the JS string literal
       2. json.loads(<that>)           -> parse the actual JSON object
+
+    The string literal is read with the JSON scanner itself, not cut out with a
+    regex: a lazy ``"(.*?)");`` match stops at the first
+    ``");`` even when that quote is escaped, which happens once a page's JSON
+    is re-embedded with ``json.dumps`` (quotes become ``\\"``) and a text field
+    holds ``");`` -- e.g. an embedded widget call in a doctor's bio.
     """
     pat = re.compile(
-        r"window\.DATA\." + re.escape(var_name) + r"\s*=\s*JSON\.parse\(\"(.*?)\"\);",
-        re.S,
+        r"window\.DATA\." + re.escape(var_name) + r"\s*=\s*JSON\.parse\(\s*",
     )
     m = pat.search(html)
     if not m:
         raise BlobNotFound(var_name)
-    raw = m.group(1)
-    js_string = json.loads('"' + raw + '"')      # step 1: un-escape
-    return json.loads(js_string)                  # step 2: parse json
+    js_string, _ = json.JSONDecoder().raw_decode(html, m.end())   # step 1: un-escape
+    if not isinstance(js_string, str):
+        raise BlobNotFound(var_name)
+    return json.loads(js_string)                                   # step 2: parse json
 
 
 def looks_like_challenge(html: str) -> bool:
